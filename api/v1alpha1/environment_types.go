@@ -25,17 +25,26 @@ import (
 
 // EnvironmentSpec defines the desired state of Environment
 type EnvironmentSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// Source defines the source of the environment.
+	// +required
+	Source SourceSpec `json:"source"`
+}
 
-	// Foo is an example field of Environment. Edit environment_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+type SourceSpec struct {
+	// The clone URL of the Git repository (HTTPS).
+	// +required
+	URL string `json:"url"`
+
+	// The path to the directory which represents the environment.
+	// +required
+	Path string `json:"path"`
 }
 
 // EnvironmentStatus defines the observed state of Environment
 type EnvironmentStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// The path to the local clone of the Environment.
+	// +optional
+	LocalClonePath string `json:"localClonePath,omitempty"`
 }
 
 //+kubebuilder:object:root=true
