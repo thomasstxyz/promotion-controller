@@ -31,3 +31,29 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - gitops.promotioncontroller.prototype
+  resources:
+  - promotions
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - gitops.promotioncontroller.prototype
+  resources:
+  - promotions/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - gitops.promotioncontroller.prototype
+  resources:
+  - promotions/status
+  verbs:
+  - get
+  - patch
+  - update

@@ -124,6 +124,9 @@ func (r *EnvironmentReconciler) reconcileEnvironment(ctx context.Context, req ct
 		return err
 	}
 
+	// Set the environment's status to ready.
+	env.Status.Ready = true
+
 	return nil
 }
 

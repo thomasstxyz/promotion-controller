@@ -45,6 +45,10 @@ type EnvironmentStatus struct {
 	// The path to the local clone of the Environment.
 	// +optional
 	LocalClonePath string `json:"localClonePath,omitempty"`
+
+	// Indicates whether the Environment is ready for promotion.
+	// +optional
+	Ready bool `json:"ready,omitempty"`
 }
 
 //+kubebuilder:object:root=true

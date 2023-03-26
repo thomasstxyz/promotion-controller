@@ -1,12 +1,21 @@
 apiVersion: gitops.promotioncontroller.prototype/v1alpha1
 kind: Promotion
 metadata:
-  labels:
-    app.kubernetes.io/name: promotion
-    app.kubernetes.io/instance: promotion-sample
-    app.kubernetes.io/part-of: promotion-controller
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/created-by: promotion-controller
-  name: promotion-sample
+  name: promotion-sample-dev-to-prod-1
 spec:
-  # TODO(user): Add fields here
+  copy:
+  - source: app-version
+    target: app-version
+  - source: ./app-version/kustomization.yaml
+    target: ./app-version/
+  - source: app-version/kustomization.yaml
+    target: app-version
+  - source: app-version/kustomization.yaml
+    target: app-version/kustomization.yaml
+  sourceEnvironment: environment-sample-dev
+  targetEnvironment: environment-sample-prod
+  strategy:
+    pullRequest:
+      title: "Promotion from dev to prod"
+      body: "Promotion from dev to prod"
+      provider: github

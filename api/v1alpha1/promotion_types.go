@@ -25,11 +25,54 @@ import (
 
 // PromotionSpec defines the desired state of Promotion
 type PromotionSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// Copy defines a list of copy operations to perform.
+	// +required
+	Copy []CopyOperation `json:"copy"`
 
-	// Foo is an example field of Promotion. Edit promotion_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+	// The source environment to promote from.
+	// +required
+	SourceEnvironment string `json:"sourceEnvironment"`
+
+	// The target environment to promote to.
+	// +required
+	TargetEnvironment string `json:"targetEnvironment"`
+
+	// Strategy defines the strategy to use when promoting.
+	// +required
+	Strategy StrategySpec `json:"strategy"`
+}
+
+// CopyOperation defines a file/directory copy operation.
+type CopyOperation struct {
+	// The source path to copy from.
+	// +required
+	Source string `json:"source"`
+
+	// The target path to copy to.
+	// +required
+	Target string `json:"target"`
+}
+
+type StrategySpec struct {
+	PullRequest PullRequestSpec `json:"pullRequest"`
+}
+
+const (
+	PullRequestProviderGitHub string = "github"
+)
+
+type PullRequestSpec struct {
+	// The title of the pull request.
+	// +required
+	Title string `json:"title"`
+
+	// The body of the pull request.
+	// +required
+	Body string `json:"body"`
+
+	// The Git provider for the pull request.
+	// +Kubebuilder:Validation:Enum=github
+	Provider string `json:"provider"`
 }
 
 // PromotionStatus defines the observed state of Promotion
