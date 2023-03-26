@@ -6,3 +6,12 @@ spec:
   source:
     url: https://github.com/thomasstxyz/example-kustomize-overlay-dev
     path: ./envs/dev
+---
+apiVersion: gitops.promotioncontroller.prototype/v1alpha1
+kind: Environment
+metadata:
+  name: environment-sample-prod
+spec:
+  source:
+    url: https://github.com/thomasstxyz/example-kustomize-overlay-prod
+    path: ./envs/prod

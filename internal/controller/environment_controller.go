@@ -62,7 +62,7 @@ func (r *EnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Defer updating the Environment object until the end of this reconcile.
+	// Defer updating the Environment object until the end of this reconciliation.
 	defer func() {
 		// Update Environment status.
 		if err := r.Status().Update(ctx, env); err != nil {
@@ -81,7 +81,7 @@ func (r *EnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return ctrl.Result{}, nil
 }
 
-// reconcileEnvironment clones the environment repository and returns the path to the cloned repository.
+// reconcileEnvironment reconciles the environment's remote git repository with a local clone.
 func (r *EnvironmentReconciler) reconcileEnvironment(ctx context.Context, req ctrl.Request, env *gitopsv1alpha1.Environment) error {
 	log := log.FromContext(ctx)
 
