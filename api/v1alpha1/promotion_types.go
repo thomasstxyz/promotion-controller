@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -73,12 +74,33 @@ type PullRequestSpec struct {
 	// The Git provider for the pull request.
 	// +Kubebuilder:Validation:Enum=github
 	Provider string `json:"provider"`
+
+	// SecrefRef reference the secret that contains the API token for the Git provider.
+	// +required
+	SecretRef corev1.LocalObjectReference `json:"secretRef"`
 }
 
 // PromotionStatus defines the observed state of Promotion
 type PromotionStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// Pull request branch name.
+	// +optional
+	PullRequestBranch string `json:"pullRequestBranch,omitempty"`
+
+	// Pull request number.
+	// +optional
+	PullRequestNumber int `json:"pullRequestNumber,omitempty"`
+
+	// Pull request URL.
+	// +optional
+	PullRequestURL string `json:"pullRequestURL,omitempty"`
+
+	// Pull request status.
+	// +optional
+	PullRequestStatus string `json:"pullRequestStatus,omitempty"`
+
+	// Pull request title.
+	// +optional
+	PullRequestTitle string `json:"pullRequestTitle,omitempty"`
 }
 
 //+kubebuilder:object:root=true

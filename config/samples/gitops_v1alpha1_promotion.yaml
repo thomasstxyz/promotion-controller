@@ -12,6 +12,9 @@ spec:
     target: app-version
   - source: app-version/kustomization.yaml
     target: app-version/kustomization.yaml
+  # test
+  - source: settings
+    target: app-version/
   sourceEnvironment: environment-sample-dev
   targetEnvironment: environment-sample-prod
   strategy:
@@ -19,3 +22,6 @@ spec:
       title: "Promotion from dev to prod"
       body: "Promotion from dev to prod"
       provider: github
+      # kubectl create secret generic github-token --from-literal=token="github_pat***"
+      secretRef:
+        name: github-token

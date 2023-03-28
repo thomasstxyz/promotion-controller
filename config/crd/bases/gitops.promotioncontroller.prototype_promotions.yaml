@@ -65,12 +65,23 @@ spec:
                       provider:
                         description: The Git provider for the pull request.
                         type: string
+                      secretRef:
+                        description: SecrefRef reference the secret that contains
+                          the API token for the Git provider.
+                        properties:
+                          name:
+                            description: 'Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                              TODO: Add other useful fields. apiVersion, kind, uid?'
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
                       title:
                         description: The title of the pull request.
                         type: string
                     required:
                     - body
                     - provider
+                    - secretRef
                     - title
                     type: object
                 required:
@@ -87,6 +98,22 @@ spec:
             type: object
           status:
             description: PromotionStatus defines the observed state of Promotion
+            properties:
+              pullRequestBranch:
+                description: Pull request branch name.
+                type: string
+              pullRequestNumber:
+                description: Pull request number.
+                type: integer
+              pullRequestStatus:
+                description: Pull request status.
+                type: string
+              pullRequestTitle:
+                description: Pull request title.
+                type: string
+              pullRequestURL:
+                description: Pull request URL.
+                type: string
             type: object
         type: object
     served: true
