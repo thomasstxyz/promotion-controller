@@ -17,7 +17,6 @@ limitations under the License.
 package v1alpha1
 
 import (
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -55,29 +54,9 @@ type CopyOperation struct {
 }
 
 type StrategySpec struct {
-	PullRequest PullRequestSpec `json:"pullRequest"`
-}
-
-const (
-	PullRequestProviderGitHub string = "github"
-)
-
-type PullRequestSpec struct {
-	// The title of the pull request.
-	// +required
-	Title string `json:"title"`
-
-	// The body of the pull request.
-	// +required
-	Body string `json:"body"`
-
-	// The Git provider for the pull request.
-	// +Kubebuilder:Validation:Enum=github
-	Provider string `json:"provider"`
-
-	// SecrefRef reference the secret that contains the API token for the Git provider.
-	// +required
-	SecretRef corev1.LocalObjectReference `json:"secretRef"`
+	// Raise a pull request against the target environment.
+	// +optional
+	PullRequest bool `json:"pullRequest,omitempty"`
 }
 
 // PromotionStatus defines the observed state of Promotion

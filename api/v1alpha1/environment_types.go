@@ -17,7 +17,14 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"fmt"
+
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+const (
+	GitProviderGitHub string = "github"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -38,6 +45,18 @@ type SourceSpec struct {
 	// The path to the directory which represents the environment.
 	// +required
 	Path string `json:"path"`
+
+	// The Git provider.
+	// Required if you want to do pull requests.
+	// +Kubebuilder:Validation:Enum=github
+	// +optional
+	Provider string `json:"provider,omitempty"`
+
+	// SecrefRef reference the secret that contains the API token for the Git provider.
+	// Secret is of type generic and has the API token string stored in the "token" key.
+	// Required if the repository is private. Required if you want to raise Pull Requests against it.
+	// +optional
+	SecretRef *corev1.LocalObjectReference `json:"secretRef,omitempty"`
 }
 
 // EnvironmentStatus defines the observed state of Environment
@@ -74,4 +93,16 @@ type EnvironmentList struct {
 
 func init() {
 	SchemeBuilder.Register(&Environment{}, &EnvironmentList{})
+}
+
+func (e *Environment) GetLocalClonePath() string {
+	return e.Status.LocalClonePath
+}
+
+func (e *Environment) GetSSHSecretObjectName() string {
+	return fmt.Sprintf("%s-ssh", e.Name)
+}
+
+func (e *Environment) GetAPITokenSecretObjectName() string {
+	return e.Spec.Source.SecretRef.Name
 }

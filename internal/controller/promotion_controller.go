@@ -26,8 +26,6 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -42,9 +40,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	gogitv5ssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
 
-	"github.com/fluxcd/go-git-providers/github"
 	"github.com/fluxcd/go-git-providers/gitprovider"
-	gogithub "github.com/google/go-github/v49/github"
 
 	gitopsv1alpha1 "github.com/thomasstxyz/promotion-controller/api/v1alpha1"
 	"github.com/thomasstxyz/promotion-controller/internal/fs"
@@ -87,7 +83,6 @@ func (r *PromotionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		log.Error(err, "Failed to get source environment")
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-
 	// Get target environment
 	targetEnv := &gitopsv1alpha1.Environment{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: prom.Namespace, Name: prom.Spec.TargetEnvironment}, targetEnv); err != nil {
@@ -100,7 +95,6 @@ func (r *PromotionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		log.Info("Source environment is not ready", "ready", sourceEnv.Status.Ready)
 		return ctrl.Result{}, nil
 	}
-
 	// Ensure target environment is ready.
 	if !targetEnv.Status.Ready {
 		log.Info("Target environment is not ready", "ready", targetEnv.Status.Ready)
@@ -132,8 +126,18 @@ func (r *PromotionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}()
 
+	cleanupTargetBranch, err := r.checkoutTargetEnvironment(ctx, req, prom, sourceEnv, targetEnv)
+	if err != nil {
+		log.Error(err, "Failed on checkoutTargetEnvironment")
+		return ctrl.Result{}, err
+	}
+
 	if err := r.copyOperations(ctx, req, prom, sourceEnv, targetEnv); err != nil {
 		log.Error(err, "Failed on copyOperations")
+		return ctrl.Result{}, err
+	}
+	if err := r.gitCommitAndPush(ctx, req, prom, sourceEnv, targetEnv); err != nil {
+		log.Error(err, "Failed on gitCommitAndPush")
 		return ctrl.Result{}, err
 	}
 
@@ -142,9 +146,71 @@ func (r *PromotionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
+	cleanupTargetBranch()
+
 	log.Info("End reconciling Promotion", "NamespacedName", req.NamespacedName)
 
 	return ctrl.Result{}, nil
+}
+
+func (r *PromotionReconciler) checkoutTargetEnvironment(ctx context.Context, req ctrl.Request, prom *gitopsv1alpha1.Promotion,
+	sourceEnv *gitopsv1alpha1.Environment, targetEnv *gitopsv1alpha1.Environment) (func(), error) {
+	log := log.FromContext(ctx)
+
+	gitrepo, err := gogitv5.PlainOpen(targetEnv.Status.LocalClonePath)
+	if err != nil {
+		log.Error(err, "Failed to open cloned git repository")
+		return nil, nil
+	}
+	worktree, err := gitrepo.Worktree()
+	if err != nil {
+		log.Error(err, "Failed to get worktree")
+		return nil, nil
+	}
+	h, err := gitrepo.Head()
+	if err != nil {
+		log.Error(err, "Failed to get current HEAD")
+		return nil, nil
+	}
+	originalBranch := h.Name().Short()
+
+	branchNamePattern := fmt.Sprintf("promote-%s-to-%s", sourceEnv.Name, targetEnv.Name)
+	if prom.Status.PullRequestBranch != branchNamePattern {
+		prom.Status.PullRequestBranch = branchNamePattern
+	}
+
+	// Cleanup local branch worktree afterwards.
+	cleanupTargetBranch := func() {
+		// Reset worktree.
+		if err := worktree.Reset(&gogitv5.ResetOptions{
+			Mode: gogitv5.HardReset,
+		}); err != nil {
+			log.Error(err, "Failed to reset worktree")
+		}
+		// Checkout original branch.
+		if err := worktree.Checkout(&gogitv5.CheckoutOptions{
+			Branch: plumbing.NewBranchReferenceName(originalBranch),
+		}); err != nil {
+			log.Error(err, "Failed to checkout source branch")
+		}
+		// Delete local branch.
+		if err := gitrepo.Storer.RemoveReference(plumbing.NewBranchReferenceName(prom.Status.PullRequestBranch)); err != nil {
+			log.Error(err, "Failed to delete local branch")
+		}
+		log.Info("Cleaned up target branch", "branch", prom.Status.PullRequestBranch)
+	}
+
+	// Checkout Pull Request branch.
+	if err := worktree.Checkout(&gogitv5.CheckoutOptions{
+		Branch: plumbing.NewBranchReferenceName(prom.Status.PullRequestBranch),
+		Create: true,
+		Keep:   true,
+	}); err != nil {
+		log.Error(err, "Failed to checkout pull request branch")
+		return cleanupTargetBranch, nil
+	}
+
+	return cleanupTargetBranch, nil
 }
 
 // copyOperations performs the copy operations for the Promotion.
@@ -216,157 +282,21 @@ func (r *PromotionReconciler) copyOperations(ctx context.Context, req ctrl.Reque
 	return nil
 }
 
-// pullRequest creates a pull request for the Promotion.
-func (r *PromotionReconciler) pullRequest(ctx context.Context, req ctrl.Request, prom *gitopsv1alpha1.Promotion,
+// gitCommitAndPush commits all changes.
+func (r *PromotionReconciler) gitCommitAndPush(ctx context.Context, req ctrl.Request, prom *gitopsv1alpha1.Promotion,
 	sourceEnv *gitopsv1alpha1.Environment, targetEnv *gitopsv1alpha1.Environment) error {
+
 	log := log.FromContext(ctx)
-
-	log.Info("Begin Pull Request", "NamespacedName", req.NamespacedName)
-
-	// Fetch kubernetes secret containing GitHub token.
-	secret := &corev1.Secret{}
-	if err := r.Get(ctx, types.NamespacedName{Name: prom.Spec.Strategy.PullRequest.SecretRef.Name, Namespace: req.Namespace}, secret); err != nil {
-		log.Error(err, "Failed to get secret", "Name", prom.Spec.Strategy.PullRequest.SecretRef.Name)
-		return err
-	}
-
-	sshSecret := &corev1.Secret{}
-	// If ssh key pair secret is not found, create it.
-	secretObjectName := fmt.Sprintf("%s-ssh", prom.Name)
-	if err := r.Get(ctx, types.NamespacedName{Name: secretObjectName, Namespace: req.Namespace}, sshSecret); err != nil {
-		if errors.IsNotFound(err) {
-			// Create ssh key pair to be used for git pushes.
-			pubKey, privKey, err := MakeSSHKeyPair()
-			if err != nil {
-				log.Error(err, "Failed to create ssh key pair")
-				return err
-			}
-
-			// Create kubernetes secret containing ssh key pair.
-			sshSecret = &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      secretObjectName,
-					Namespace: req.Namespace,
-				},
-				StringData: map[string]string{
-					"public":  pubKey,
-					"private": privKey,
-				},
-			}
-
-			if err := r.Create(ctx, sshSecret); err != nil {
-				log.Error(err, "Failed to create ssh secret")
-				return err
-			}
-
-			if err := r.Get(ctx, types.NamespacedName{Name: secretObjectName, Namespace: req.Namespace}, sshSecret); err != nil {
-				log.Error(err, "Failed to get ssh secret, even after creating it")
-				return err
-			}
-		}
-	}
-
-	// --- Provider specific pull request logic.
-
-	var repo gitprovider.OrgRepository
-	var repoInfo gitprovider.RepositoryInfo
-
-	if prom.Spec.Strategy.PullRequest.Provider == gitopsv1alpha1.PullRequestProviderGitHub {
-		// Create a new client
-		c, err := github.NewClient(gitprovider.WithOAuth2Token(string(secret.Data["token"])))
-		if err != nil {
-			log.Error(err, "Failed to create GitHub client")
-			return err
-		}
-
-		// Parse the URL into an OrgRepositoryRef
-		ref, err := gitprovider.ParseOrgRepositoryURL(targetEnv.Spec.Source.URL)
-		if err != nil {
-			log.Error(err, "Failed to parse repository URL", "URL", targetEnv.Spec.Source.URL)
-			return err
-		}
-
-		// Get public information about the git repository.
-		repo, err = c.OrgRepositories().Get(ctx, *ref)
-		if err != nil {
-			log.Error(err, "Failed to get repository", "OrgRepositoryRef", ref)
-			return err
-		}
-
-		// Use .Get() to aquire a high-level gitprovider.OrganizationInfo struct
-		repoInfo = repo.Get()
-		// Cast the internal object to a *gogithub.Repository to access custom data
-		internalRepo := repo.APIObject().(*gogithub.Repository)
-
-		fmt.Printf("Description: %s. Homepage: %s", *repoInfo.Description, internalRepo.GetHomepage())
-		// Output: Description: Bla bla.. Homepage: https://home.page
-
-		// Upload the public key to the GitHub repository.
-		_, err = repo.DeployKeys().Create(ctx, gitprovider.DeployKeyInfo{
-			Name:     fmt.Sprintf("Promotion Bot (%s)", prom.Name),
-			Key:      []byte(sshSecret.Data["public"]),
-			ReadOnly: &[]bool{false}[0],
-		})
-		if err == gitprovider.ErrAlreadyExists || strings.Contains(err.Error(), "key is already in use") {
-			log.Info("Deploy key already exists", "Name", fmt.Sprintf("Promotion Bot (%s)", prom.Name))
-		} else if err != nil {
-			log.Error(err, "Failed to create deploy key", "Name", fmt.Sprintf("Promotion Bot (%s)", prom.Name))
-			return err
-		}
-	}
-
-	// --- End of provider specific pull request logic.
 
 	gitrepo, err := gogitv5.PlainOpen(targetEnv.Status.LocalClonePath)
 	if err != nil {
 		log.Error(err, "Failed to open cloned repository")
 		return err
 	}
+
 	worktree, err := gitrepo.Worktree()
 	if err != nil {
 		log.Error(err, "Failed to get worktree")
-		return err
-	}
-	h, err := gitrepo.Head()
-	if err != nil {
-		log.Error(err, "Failed to get current HEAD")
-		return err
-	}
-	originalBranch := h.Name().Short()
-
-	if branchNamePattern := fmt.Sprintf("promote-%s-to-%s", sourceEnv.Name, targetEnv.Name); prom.Status.PullRequestBranch != branchNamePattern {
-		prom.Status.PullRequestBranch = branchNamePattern
-	}
-
-	// Cleanup local branch worktree afterwards.
-	defer func() {
-		// Reset worktree.
-		if err := worktree.Reset(&gogitv5.ResetOptions{
-			Mode: gogitv5.HardReset,
-		}); err != nil {
-			log.Error(err, "Failed to reset worktree")
-		}
-
-		// Checkout original branch.
-		if err := worktree.Checkout(&gogitv5.CheckoutOptions{
-			Branch: plumbing.NewBranchReferenceName(originalBranch),
-		}); err != nil {
-			log.Error(err, "Failed to checkout source branch")
-		}
-
-		// Delete local branch.
-		if err := gitrepo.Storer.RemoveReference(plumbing.NewBranchReferenceName(prom.Status.PullRequestBranch)); err != nil {
-			log.Error(err, "Failed to delete local branch")
-		}
-	}()
-
-	// Checkout Pull Request branch.
-	if err := worktree.Checkout(&gogitv5.CheckoutOptions{
-		Branch: plumbing.NewBranchReferenceName(prom.Status.PullRequestBranch),
-		Create: true,
-		Keep:   true,
-	}); err != nil {
-		log.Error(err, "Failed to checkout pull request branch")
 		return err
 	}
 
@@ -394,7 +324,14 @@ func (r *PromotionReconciler) pullRequest(ctx context.Context, req ctrl.Request,
 		return err
 	}
 
-	// Transform HTTPS URL to SSH URL.
+	// Fetch kubernetes secret containing the SSHSecret of the target environment.
+	sshSecret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Name: targetEnv.GetSSHSecretObjectName(), Namespace: targetEnv.Namespace}, sshSecret); err != nil {
+		log.Error(err, "Failed to get sshSecret", "sshSecret", targetEnv.GetSSHSecretObjectName())
+		return err
+	}
+
+	// Transform HTTPS URL to SSH URL (ugly, FIXME).
 	sshURL := strings.Replace(targetEnv.Spec.Source.URL, "https://", "git@", 1)
 	sshURL = strings.Replace(sshURL, ".com/", ".com:", 1)
 
@@ -405,7 +342,7 @@ func (r *PromotionReconciler) pullRequest(ctx context.Context, req ctrl.Request,
 		return err
 	}
 
-	// Push changes to GitHub remote, but use SSH auth and SSH URL.
+	// Push changes to remote, but use SSH Auth and SSH URL.
 	if err := gitrepo.Push(&gogitv5.PushOptions{
 		Auth: &gogitv5ssh.PublicKeys{
 			User:   "git",
@@ -423,7 +360,31 @@ func (r *PromotionReconciler) pullRequest(ctx context.Context, req ctrl.Request,
 		return err
 	}
 
-	if prom.Spec.Strategy.PullRequest.Provider == gitopsv1alpha1.PullRequestProviderGitHub {
+	return nil
+}
+
+// pullRequest creates a pull request for the Promotion.
+func (r *PromotionReconciler) pullRequest(ctx context.Context, req ctrl.Request, prom *gitopsv1alpha1.Promotion,
+	sourceEnv *gitopsv1alpha1.Environment, targetEnv *gitopsv1alpha1.Environment) error {
+	log := log.FromContext(ctx)
+
+	log.Info("Begin Pull Request", "NamespacedName", req.NamespacedName)
+
+	// Fetch kubernetes secret containing the API Token of the target environment.
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Name: targetEnv.GetAPITokenSecretObjectName(), Namespace: targetEnv.Namespace}, secret); err != nil {
+		log.Error(err, "Failed to get secret", "Name", targetEnv.GetAPITokenSecretObjectName())
+		return err
+	}
+
+	// Create a new git provider client.
+	repo, repoInfo, err := NewGitProviderRepository(ctx, targetEnv, secret)
+	if err != nil {
+		log.Error(err, "Failed to create gitprovider client")
+		return err
+	}
+
+	if targetEnv.Spec.Source.Provider == gitopsv1alpha1.GitProviderGitHub {
 		prom.Status.PullRequestTitle = fmt.Sprintf("Promote changes from %s to %s", sourceEnv.Name, targetEnv.Name)
 
 		var pr gitprovider.PullRequest

@@ -41,6 +41,23 @@ spec:
                   path:
                     description: The path to the directory which represents the environment.
                     type: string
+                  provider:
+                    description: The Git provider. Required if you want to do pull
+                      requests.
+                    type: string
+                  secretRef:
+                    description: SecrefRef reference the secret that contains the
+                      API token for the Git provider. Secret is of type generic and
+                      has the API token string stored in the "token" key. Required
+                      if the repository is private. Required if you want to raise
+                      Pull Requests against it.
+                    properties:
+                      name:
+                        description: 'Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                          TODO: Add other useful fields. apiVersion, kind, uid?'
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
                   url:
                     description: The clone URL of the Git repository (HTTPS).
                     type: string

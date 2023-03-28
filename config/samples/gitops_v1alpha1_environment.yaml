@@ -1,7 +1,7 @@
 apiVersion: gitops.promotioncontroller.prototype/v1alpha1
 kind: Environment
 metadata:
-  name: environment-sample-dev
+  name: dev
 spec:
   source:
     url: https://github.com/thomasstxyz/example-kustomize-overlay-dev
@@ -10,8 +10,15 @@ spec:
 apiVersion: gitops.promotioncontroller.prototype/v1alpha1
 kind: Environment
 metadata:
-  name: environment-sample-prod
+  name: prod
 spec:
   source:
     url: https://github.com/thomasstxyz/example-kustomize-overlay-prod
     path: ./envs/prod
+    # Get a personal access token from GitHub, and store it in a secret.
+    # Create the secret with the following command:
+    # $ kubectl create secret generic github-token --from-literal=token="github_pat***"
+    secretRef:
+      name: github-token
+    # spec.source.provider is required if you want to raise a pull request on promotion.
+    provider: github

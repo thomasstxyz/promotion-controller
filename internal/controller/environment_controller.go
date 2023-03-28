@@ -18,15 +18,23 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strings"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	gogitv5 "github.com/go-git/go-git/v5"
+
+	"github.com/fluxcd/go-git-providers/gitprovider"
 
 	gitopsv1alpha1 "github.com/thomasstxyz/promotion-controller/api/v1alpha1"
 )
@@ -41,15 +49,6 @@ type EnvironmentReconciler struct {
 //+kubebuilder:rbac:groups=gitops.promotioncontroller.prototype,resources=environments/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=gitops.promotioncontroller.prototype,resources=environments/finalizers,verbs=update
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the Environment object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.14.1/pkg/reconcile
 func (r *EnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 
@@ -71,7 +70,12 @@ func (r *EnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}()
 
-	if err := r.reconcileEnvironment(ctx, req, env); err != nil {
+	if err := r.reconcileAuthConfig(ctx, req, env); err != nil {
+		log.Error(err, "Failed to reconcile authentication configuration")
+		return ctrl.Result{}, err
+	}
+
+	if err := r.reconcileGitRepository(ctx, req, env); err != nil {
 		log.Error(err, "Failed to reconcile environment")
 		return ctrl.Result{}, err
 	}
@@ -81,8 +85,83 @@ func (r *EnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return ctrl.Result{}, nil
 }
 
-// reconcileEnvironment reconciles the environment's remote git repository with a local clone.
-func (r *EnvironmentReconciler) reconcileEnvironment(ctx context.Context, req ctrl.Request, env *gitopsv1alpha1.Environment) error {
+// reconcileAuthConfig reconciles the authentication configuration for the environment's remote git repository.
+func (r *EnvironmentReconciler) reconcileAuthConfig(ctx context.Context, req ctrl.Request, env *gitopsv1alpha1.Environment) error {
+	log := log.FromContext(ctx)
+
+	if env.Spec.Source.SecretRef == nil {
+		log.Info("No secret reference provided, skipping authentication configuration")
+		return nil
+	}
+
+	// Fetch kubernetes secret containing the GitProvider API Token.
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Name: env.Spec.Source.SecretRef.Name, Namespace: req.Namespace}, secret); err != nil {
+		log.Error(err, "Failed to get secret", "Name", env.Spec.Source.SecretRef.Name)
+		return err
+	}
+
+	// create a new gitprovider client and repository interface.
+	repo, _, err := NewGitProviderRepository(ctx, env, secret)
+	if err != nil {
+		log.Error(err, "Failed to create gitprovider client")
+		return err
+	}
+
+	// --- If ssh key pair secret is not found, create it.
+
+	sshSecret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Name: env.GetSSHSecretObjectName(), Namespace: req.Namespace}, sshSecret); err != nil {
+		if errors.IsNotFound(err) {
+			// Create ssh key pair to be used for git pushes.
+			pubKey, privKey, err := MakeSSHKeyPair()
+			if err != nil {
+				log.Error(err, "Failed to create ssh key pair")
+				return err
+			}
+
+			// Create kubernetes secret containing ssh key pair.
+			sshSecret = &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      env.GetSSHSecretObjectName(),
+					Namespace: req.Namespace,
+				},
+				StringData: map[string]string{
+					"public":  pubKey,
+					"private": privKey,
+				},
+			}
+			if err := r.Create(ctx, sshSecret); err != nil {
+				log.Error(err, "Failed to create ssh secret")
+				return err
+			}
+
+			// Fetch newly created object, in order to have the Data map[string][]byte field populated.
+			if err := r.Get(ctx, types.NamespacedName{Name: env.GetSSHSecretObjectName(), Namespace: req.Namespace}, sshSecret); err != nil {
+				log.Error(err, "Failed to get ssh secret, even after creating it")
+				return err
+			}
+		}
+	}
+
+	// Upload the public key to the Git repository.
+	_, err = repo.DeployKeys().Create(ctx, gitprovider.DeployKeyInfo{
+		Name:     fmt.Sprintf("Promotion Bot (%s)", env.Name),
+		Key:      []byte(sshSecret.Data["public"]),
+		ReadOnly: &[]bool{false}[0],
+	})
+	if err == gitprovider.ErrAlreadyExists || strings.Contains(err.Error(), "key is already in use") {
+		log.Info("Deploy key already exists", "Name", fmt.Sprintf("Promotion Bot (%s)", env.Name))
+	} else if err != nil {
+		log.Error(err, "Failed to create deploy key", "Name", fmt.Sprintf("Promotion Bot (%s)", env.Name))
+		return err
+	}
+
+	return nil
+}
+
+// reconcileGitRepository reconciles the environment's remote git repository with a local clone.
+func (r *EnvironmentReconciler) reconcileGitRepository(ctx context.Context, req ctrl.Request, env *gitopsv1alpha1.Environment) error {
 	log := log.FromContext(ctx)
 
 	// Check if the environment repository has already been cloned.
