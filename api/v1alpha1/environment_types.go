@@ -42,6 +42,10 @@ type SourceSpec struct {
 	// +required
 	URL string `json:"url"`
 
+	// Reference specifies the Git reference to resolve and monitor for changes.
+	// +required
+	Reference GitRepositoryRef `json:"ref"`
+
 	// The path to the directory which represents the environment.
 	// +required
 	Path string `json:"path"`
@@ -57,6 +61,13 @@ type SourceSpec struct {
 	// Required if the repository is private. Required if you want to raise Pull Requests against it.
 	// +optional
 	SecretRef *corev1.LocalObjectReference `json:"secretRef,omitempty"`
+}
+
+// GitRepositoryRef specifies the Git reference to resolve and checkout.
+type GitRepositoryRef struct {
+	// Branch to check out.
+	// +required
+	Branch string `json:"branch"`
 }
 
 // EnvironmentStatus defines the observed state of Environment

@@ -5,6 +5,8 @@ metadata:
 spec:
   source:
     url: https://github.com/thomasstxyz/example-kustomize-overlay-dev
+    ref:
+      branch: main
     path: ./envs/dev
 ---
 apiVersion: gitops.promotioncontroller.prototype/v1alpha1
@@ -14,6 +16,8 @@ metadata:
 spec:
   source:
     url: https://github.com/thomasstxyz/example-kustomize-overlay-prod
+    ref:
+      branch: main
     path: ./envs/prod
     # Get a personal access token from GitHub, and store it in a secret.
     # Create the secret with the following command:

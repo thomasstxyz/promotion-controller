@@ -17,11 +17,13 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"text/template"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -101,36 +103,37 @@ func (r *PromotionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, nil
 	}
 
-	// Defer until the end of this main reconciliation loop.
-	defer func() {
-		// Update Promotion status.
-		if err := r.Status().Update(ctx, prom); err != nil {
-			log.Error(err, "Failed to update Promotion status")
-			return
-		}
+	cleanupClonedSourceEnvironment, err := r.CloneEnvironment(ctx, req, prom, sourceEnv)
+	if err != nil {
+		log.Error(err, "Failed on CloneEnvironment", "Environment", sourceEnv.Name)
+		return ctrl.Result{}, err
+	}
 
-		// Reset worktree of target environment.
-		gitrepo, err := gogitv5.PlainOpen(targetEnv.Status.LocalClonePath)
-		if err != nil {
-			log.Error(err, "Failed to open local repository of target environment")
-			return
-		}
-		worktree, err := gitrepo.Worktree()
-		if err != nil {
-			log.Error(err, "Failed to get worktree")
-			return
-		}
-		if err := worktree.Reset(&gogitv5.ResetOptions{Mode: gogitv5.HardReset}); err != nil {
-			log.Error(err, "Failed to reset worktree")
-			return
-		}
-	}()
+	cleanupClonedTargetEnvironment, err := r.CloneEnvironment(ctx, req, prom, targetEnv)
+	if err != nil {
+		log.Error(err, "Failed on CloneEnvironment", "Environment", targetEnv.Name)
+		return ctrl.Result{}, err
+	}
 
 	cleanupTargetBranch, err := r.checkoutTargetEnvironment(ctx, req, prom, sourceEnv, targetEnv)
 	if err != nil {
 		log.Error(err, "Failed on checkoutTargetEnvironment")
 		return ctrl.Result{}, err
 	}
+
+	// Defer until the end of this main reconciliation loop.
+	defer func() {
+		// Remove local promotion branch.
+		cleanupTargetBranch()
+		// Remove source environment locally.
+		cleanupClonedSourceEnvironment()
+		cleanupClonedTargetEnvironment()
+		// Update Promotion status.
+		if err := r.Status().Update(ctx, prom); err != nil {
+			log.Error(err, "Failed to update Promotion status")
+			return
+		}
+	}()
 
 	if err := r.copyOperations(ctx, req, prom, sourceEnv, targetEnv); err != nil {
 		log.Error(err, "Failed on copyOperations")
@@ -146,11 +149,62 @@ func (r *PromotionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
-	cleanupTargetBranch()
-
 	log.Info("End reconciling Promotion", "NamespacedName", req.NamespacedName)
 
 	return ctrl.Result{}, nil
+}
+
+func (r *PromotionReconciler) CloneEnvironment(ctx context.Context, req ctrl.Request, prom *gitopsv1alpha1.Promotion,
+	env *gitopsv1alpha1.Environment) (func(), error) {
+	log := log.FromContext(ctx)
+
+	tmpDir, err := os.MkdirTemp("", env.Namespace+"-"+env.Name+"-")
+	if err != nil {
+		log.Error(err, "Failed to create temporary directory")
+		return nil, err
+	}
+	
+	// Delete locally cloned Environment afterwards.
+	cleanupClonedEnvironment := func() {
+		// Delete directory tmpDir.
+		if err := os.RemoveAll(tmpDir); err != nil {
+			log.Error(err, "Failed to remove cloned environment")
+		}
+		log.Info("Cleaned up cloned environment", "path", tmpDir)
+	}
+
+	if _, err := gogitv5.PlainClone(tmpDir, false, &gogitv5.CloneOptions{
+		URL:           env.Spec.Source.URL,
+		ReferenceName: plumbing.NewBranchReferenceName(env.Spec.Source.Reference.Branch),
+	}); err == nil {
+		log.Info("Cloned repository successfully")
+	} else if err != nil {
+		log.Error(err, "Failed to clone git repository")
+		return cleanupClonedEnvironment, err
+	}
+
+	env.Status.LocalClonePath = tmpDir
+
+	gitrepo, err := gogitv5.PlainOpen(env.Status.LocalClonePath)
+	if err != nil {
+		log.Error(err, "Failed to open cloned repository")
+		return cleanupClonedEnvironment, err
+	}
+	worktree, err := gitrepo.Worktree()
+	if err != nil {
+		log.Error(err, "Failed to get worktree")
+		return cleanupClonedEnvironment, err
+	}
+
+	if err := worktree.Checkout(&gogitv5.CheckoutOptions{
+		Branch: plumbing.NewBranchReferenceName(env.Spec.Source.Reference.Branch),
+		Force:  true,
+	}); err != nil {
+		log.Error(err, "Failed to checkout branch")
+		return cleanupClonedEnvironment, err
+	}
+
+	return cleanupClonedEnvironment, nil
 }
 
 func (r *PromotionReconciler) checkoutTargetEnvironment(ctx context.Context, req ctrl.Request, prom *gitopsv1alpha1.Promotion,
@@ -160,26 +214,40 @@ func (r *PromotionReconciler) checkoutTargetEnvironment(ctx context.Context, req
 	gitrepo, err := gogitv5.PlainOpen(targetEnv.Status.LocalClonePath)
 	if err != nil {
 		log.Error(err, "Failed to open cloned git repository")
-		return nil, nil
+		return nil, err
 	}
 	worktree, err := gitrepo.Worktree()
 	if err != nil {
 		log.Error(err, "Failed to get worktree")
-		return nil, nil
+		return nil, err
 	}
-	h, err := gitrepo.Head()
-	if err != nil {
-		log.Error(err, "Failed to get current HEAD")
-		return nil, nil
+	if err := worktree.Reset(&gogitv5.ResetOptions{
+		Mode: gogitv5.HardReset,
+	}); err != nil {
+		log.Error(err, "Failed to reset worktree")
+		return nil, err
 	}
-	originalBranch := h.Name().Short()
+
+	if err := worktree.Pull(&gogitv5.PullOptions{}); err == gogitv5.NoErrAlreadyUpToDate {
+		log.Info("Repository is up to date with remote")
+	} else if err != nil {
+		log.Error(err, "Failed to pull from remote")
+		return nil, err
+	}
+
+	// h, err := gitrepo.Head()
+	// if err != nil {
+	// 	log.Error(err, "Failed to get current HEAD")
+	// 	return nil, err
+	// }
+	// originalBranch := h.Name().Short()
 
 	branchNamePattern := fmt.Sprintf("promote-%s-to-%s", sourceEnv.Name, targetEnv.Name)
 	if prom.Status.PullRequestBranch != branchNamePattern {
 		prom.Status.PullRequestBranch = branchNamePattern
 	}
 
-	// Cleanup local branch worktree afterwards.
+	// Cleanup local promotion branch worktree afterwards.
 	cleanupTargetBranch := func() {
 		// Reset worktree.
 		if err := worktree.Reset(&gogitv5.ResetOptions{
@@ -189,13 +257,14 @@ func (r *PromotionReconciler) checkoutTargetEnvironment(ctx context.Context, req
 		}
 		// Checkout original branch.
 		if err := worktree.Checkout(&gogitv5.CheckoutOptions{
-			Branch: plumbing.NewBranchReferenceName(originalBranch),
+			Branch: plumbing.NewBranchReferenceName(targetEnv.Spec.Source.Reference.Branch),
+			Force:  true,
 		}); err != nil {
-			log.Error(err, "Failed to checkout source branch")
+			log.Error(err, "Failed to checkout original branch")
 		}
-		// Delete local branch.
+		// Delete local promotion branch.
 		if err := gitrepo.Storer.RemoveReference(plumbing.NewBranchReferenceName(prom.Status.PullRequestBranch)); err != nil {
-			log.Error(err, "Failed to delete local branch")
+			log.Error(err, "Failed to delete local promotion branch")
 		}
 		log.Info("Cleaned up target branch", "branch", prom.Status.PullRequestBranch)
 	}
@@ -204,16 +273,27 @@ func (r *PromotionReconciler) checkoutTargetEnvironment(ctx context.Context, req
 	if err := worktree.Checkout(&gogitv5.CheckoutOptions{
 		Branch: plumbing.NewBranchReferenceName(prom.Status.PullRequestBranch),
 		Create: true,
-		Keep:   true,
+		Force:  true,
 	}); err != nil {
 		log.Error(err, "Failed to checkout pull request branch")
-		return cleanupTargetBranch, nil
+		return cleanupTargetBranch, err
 	}
+
+	// Pull state of remote Pull Request branch.
+	// if err := worktree.Pull(&gogitv5.PullOptions{
+	// 	ReferenceName: plumbing.NewBranchReferenceName(prom.Status.PullRequestBranch),
+	// }); err == gogitv5.NoErrAlreadyUpToDate {
+	// 	log.Info("Repository is up to date with remote")
+	// } else if err != nil {
+	// 	log.Error(err, "Failed to pull from remote")
+	// 	return nil, nil
+	// }
 
 	return cleanupTargetBranch, nil
 }
 
 // copyOperations performs the copy operations for the Promotion.
+// TODO: would be nice to have the copy operations behave like Unix/Linux cp command.
 func (r *PromotionReconciler) copyOperations(ctx context.Context, req ctrl.Request, prom *gitopsv1alpha1.Promotion,
 	sourceEnv *gitopsv1alpha1.Environment, targetEnv *gitopsv1alpha1.Environment) error {
 	log := log.FromContext(ctx)
@@ -300,26 +380,42 @@ func (r *PromotionReconciler) gitCommitAndPush(ctx context.Context, req ctrl.Req
 		return err
 	}
 
-	// Add changes to staging area.
 	if err := worktree.AddGlob("."); err != nil {
 		log.Error(err, "Failed to add changes to staging area")
 		return err
 	}
 
-	// Commit changes to branch.
-	if _, err := worktree.Commit(fmt.Sprintf("Promote changes from %s to %s",
-		sourceEnv.Name, targetEnv.Name), &gogitv5.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Promotion Bot",
-			Email: "bot@promotioncontroller.prototype",
-			When:  time.Now(),
-		},
-		Committer: &object.Signature{
-			Name:  "Promotion Bot",
-			Email: "bot@example.com",
-			When:  time.Now(),
-		},
-	}); err != nil {
+	// Template commit message.
+	type TemplateData struct {
+		Prom      *gitopsv1alpha1.Promotion
+		SourceEnv *gitopsv1alpha1.Environment
+		TargetEnv *gitopsv1alpha1.Environment
+	}
+	tplData := TemplateData{prom, sourceEnv, targetEnv}
+	tmpl, err := template.New("tpl").Parse("Promote changes from {{.SourceEnv.Name}} to {{.TargetEnv.Name}}\n\n{{range .Prom.Spec.Copy}}{{.Source}} -> {{.Target}}\n{{end}}\nNote: Left side represents source environment and right side represents target environment.")
+	if err != nil {
+		return err
+	}
+	var tpl bytes.Buffer
+	err = tmpl.Execute(&tpl, tplData)
+	if err != nil {
+		return err
+	}
+	commitMsg := tpl.String()
+
+	if _, err := worktree.Commit(commitMsg,
+		&gogitv5.CommitOptions{
+			Author: &object.Signature{
+				Name:  "Promotion Bot",
+				Email: "bot@promotioncontroller.prototype",
+				When:  time.Now(),
+			},
+			Committer: &object.Signature{
+				Name:  "Promotion Bot",
+				Email: "bot@example.com",
+				When:  time.Now(),
+			},
+		}); err != nil {
 		log.Error(err, "Failed to commit changes")
 		return err
 	}
@@ -342,22 +438,44 @@ func (r *PromotionReconciler) gitCommitAndPush(ctx context.Context, req ctrl.Req
 		return err
 	}
 
-	// Push changes to remote, but use SSH Auth and SSH URL.
-	if err := gitrepo.Push(&gogitv5.PushOptions{
-		Auth: &gogitv5ssh.PublicKeys{
-			User:   "git",
-			Signer: sshSigner,
-		},
-		RemoteName: "origin",
-		RemoteURL:  sshURL,
-		Force:      true,
-		RefSpecs: []gogitv5config.RefSpec{
-			gogitv5config.RefSpec(fmt.Sprintf("refs/heads/%s:refs/heads/%s", prom.Status.PullRequestBranch, prom.Status.PullRequestBranch)),
-		},
-		Progress: os.Stdout,
-	}); err != nil {
-		log.Error(err, "Failed to push changes")
-		return err
+	refSpec := fmt.Sprintf("refs/heads/%s:refs/heads/%s", prom.Status.PullRequestBranch, prom.Status.PullRequestBranch)
+
+	// Fetch remote branch remotes/origin/promote-dev-to-prod
+	// if err := gitrepo.Fetch(&gogitv5.FetchOptions{
+	// 	Auth: &gogitv5ssh.PublicKeys{
+	// 		User:   "git",
+	// 		Signer: sshSigner,
+	// 	},
+	// 	RemoteName: "origin",
+	// 	RemoteURL:  sshURL,
+	// 	RefSpecs: []gogitv5config.RefSpec{gogitv5config.RefSpec(fmt.Sprintf("refs/heads/%s:remotes/origin/%s", prom.Status.PullRequestBranch, prom.Status.PullRequestBranch))},
+	// }); err != nil {
+	// 	log.Error(err, "Failed to fetch remote branch", "refSpec", refSpec)
+	// 	return err
+	// }
+
+	// TODO: Do not push if there are no differences.
+
+	var localBranch string = "dere2"
+	var remoteBranch string = "dere"
+
+	if localBranch != remoteBranch {
+		// Push changes to remote, but use SSH Auth and SSH URL.
+		if err := gitrepo.Push(&gogitv5.PushOptions{
+			Auth: &gogitv5ssh.PublicKeys{
+				User:   "git",
+				Signer: sshSigner,
+			},
+			RemoteName: "origin",
+			RemoteURL:  sshURL,
+			Force:      true,
+			RefSpecs: []gogitv5config.RefSpec{
+				gogitv5config.RefSpec(refSpec),
+			},
+		}); err != nil {
+			log.Error(err, "Failed to push changes")
+			return err
+		}
 	}
 
 	return nil

@@ -45,6 +45,16 @@ spec:
                     description: The Git provider. Required if you want to do pull
                       requests.
                     type: string
+                  ref:
+                    description: Reference specifies the Git reference to resolve
+                      and monitor for changes.
+                    properties:
+                      branch:
+                        description: Branch to check out.
+                        type: string
+                    required:
+                    - branch
+                    type: object
                   secretRef:
                     description: SecrefRef reference the secret that contains the
                       API token for the Git provider. Secret is of type generic and
@@ -63,6 +73,7 @@ spec:
                     type: string
                 required:
                 - path
+                - ref
                 - url
                 type: object
             required:

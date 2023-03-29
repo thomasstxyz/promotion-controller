@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	gogitv5 "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 
 	"github.com/fluxcd/go-git-providers/gitprovider"
 
@@ -75,10 +76,10 @@ func (r *EnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
-	if err := r.reconcileGitRepository(ctx, req, env); err != nil {
-		log.Error(err, "Failed to reconcile environment")
-		return ctrl.Result{}, err
-	}
+	// if err := r.reconcileGitRepository(ctx, req, env); err != nil {
+	// 	log.Error(err, "Failed to reconcile environment")
+	// 	return ctrl.Result{}, err
+	// }
 
 	log.Info("End reconciling Environment", "NamespacedName", req.NamespacedName)
 
@@ -156,6 +157,8 @@ func (r *EnvironmentReconciler) reconcileAuthConfig(ctx context.Context, req ctr
 		log.Error(err, "Failed to create deploy key", "Name", fmt.Sprintf("Promotion Bot (%s)", env.Name))
 		return err
 	}
+	
+	env.Status.Ready = true
 
 	return nil
 }
@@ -164,9 +167,8 @@ func (r *EnvironmentReconciler) reconcileAuthConfig(ctx context.Context, req ctr
 func (r *EnvironmentReconciler) reconcileGitRepository(ctx context.Context, req ctrl.Request, env *gitopsv1alpha1.Environment) error {
 	log := log.FromContext(ctx)
 
-	// Check if the environment repository has already been cloned.
-	// If the environment repository has not been cloned, clone it.
-	if _, err := gogitv5.PlainOpen(env.Status.LocalClonePath); err == gogitv5.ErrRepositoryNotExists {
+	// If the environment repository has not already been cloned, clone it.
+	if _, err := gogitv5.PlainOpen(env.Status.LocalClonePath); err == gogitv5.ErrRepositoryNotExists || err != nil {
 		tmpDir, err := os.MkdirTemp("", req.Namespace+"-"+req.Name+"-")
 		if err != nil {
 			log.Error(err, "Failed to create temporary directory")
@@ -174,7 +176,8 @@ func (r *EnvironmentReconciler) reconcileGitRepository(ctx context.Context, req 
 		}
 
 		if _, err := gogitv5.PlainClone(tmpDir, false, &gogitv5.CloneOptions{
-			URL: env.Spec.Source.URL,
+			URL:           env.Spec.Source.URL,
+			ReferenceName: plumbing.NewBranchReferenceName(env.Spec.Source.Reference.Branch),
 		}); err == nil {
 			log.Info("Cloned repository successfully")
 		} else if err != nil {
@@ -193,6 +196,21 @@ func (r *EnvironmentReconciler) reconcileGitRepository(ctx context.Context, req 
 	worktree, err := gitrepo.Worktree()
 	if err != nil {
 		log.Error(err, "Failed to get worktree")
+		return err
+	}
+
+	if err := worktree.Checkout(&gogitv5.CheckoutOptions{
+		Branch: plumbing.NewBranchReferenceName(env.Spec.Source.Reference.Branch),
+		Force:  true,
+	}); err != nil {
+		log.Error(err, "Failed to checkout branch")
+		return err
+	}
+
+	if err := worktree.Reset(&gogitv5.ResetOptions{
+		Mode: gogitv5.HardReset,
+	}); err != nil {
+		log.Error(err, "Failed to reset worktree")
 		return err
 	}
 
